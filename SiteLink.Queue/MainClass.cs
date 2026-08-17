@@ -1,20 +1,32 @@
 ﻿using Microsoft.Extensions.DependencyInjection;
 using Mirror;
 using SiteLink.API;
+using SiteLink.API.Core;
 using SiteLink.API.Events;
 using SiteLink.API.Events.Args;
-using SiteLink.API.Misc;
 using SiteLink.API.Networking;
 using SiteLink.API.Plugins;
 using SiteLink.API.Structs;
 using SiteLink.API.Translations;
 using SiteLink.Queue.Services;
+using System.Collections.Concurrent;
 
 namespace SiteLink.Queue;
 
 public class MainClass : Plugin<Config, Translations>
 {
+    private static readonly ConcurrentDictionary<string, Server> PendingQueueTargets = new();
+
     public static MainClass Instance { get; private set; }
+
+    public QueueServer QueueServer { get; private set; }
+
+    internal static bool TryTakeQueueTarget(string userId, out Server server)
+    {
+        return PendingQueueTargets.TryRemove(
+            userId,
+            out server);
+    }
 
     public override string Name { get; } = "Queue";
 
@@ -30,6 +42,9 @@ public class MainClass : Plugin<Config, Translations>
     public override void OnLoad(IServiceCollection collection)
     {
         Instance = this;
+
+        QueueServer = new QueueServer();
+        Server.Register(QueueServer);
 
         PlaceholderRegistry.Register("queue_count", context =>
         {
@@ -59,6 +74,12 @@ public class MainClass : Plugin<Config, Translations>
 
     public override void OnUnload()
     {
+        if (QueueServer != null)
+        {
+            Server.Unregister(QueueServer.Name);
+            QueueServer = null;
+        }
+
         EventManager.Client.ConnectionResponse -= OnConnectionResponse;
         EventManager.Client.JoinedServer -= OnJoinedServer;
         EventManager.Listener.ListenerRegistered -= OnListenerRegistered;
@@ -98,27 +119,16 @@ public class MainClass : Plugin<Config, Translations>
 
     private void OnConnectionResponse(ClientConnectionResponseEvent ev)
     {
+        if (ev.Response is not ServerIsFullResponse)
+            return;
+
         if (!Config.ServersWithQueue.Contains(ev.Server.Name))
             return;
 
-        switch (ev.Response)
-        {
-            case ServerIsFullResponse _:
-                if (ev.Connection.Session.World is QueueWorld world)
-                {
-                    world.ConnectingTo = ev.Server;
-                }
-                else
-                {
-                    ev.Connection.Session.World = new QueueWorld(ev.Server);
-                    int position = QueueService.GetPositionInQueue(ev.Connection.Session, ev.Server);
-                    SiteLinkLogger.Info(Translate(
-                        ev.Connection.Session,
-                        translations => translations.AddedToQueueLog,
-                        TranslationContext.For(ev.Connection.Session, ev.Server)
-                            .With("queue_position", position)));
-                }
-                break;
-        }
+        ev.IsCancelled = true;
+
+        PendingQueueTargets[ev.Connection.PreAuth.UserId] = ev.Server;
+
+        ev.Connection.Connect(QueueServer.Instance, silent: true);
     }
 }

@@ -4,6 +4,7 @@ using SiteLink.API;
 using SiteLink.API.Core;
 using SiteLink.API.Events;
 using SiteLink.API.Events.Args;
+using SiteLink.API.Misc;
 using SiteLink.API.Networking;
 using SiteLink.API.Plugins;
 using SiteLink.API.Structs;
@@ -126,6 +127,20 @@ public class MainClass : Plugin<Config, Translations>
             return;
 
         ev.IsCancelled = true;
+
+        if (ev.Connection.Session?.Server == QueueServer.Instance)
+        {
+            if (ev.Connection.Session.World is QueueWorld queueWorld)
+                queueWorld.ConnectingTo = ev.Server;
+
+            SiteLinkLogger.Info(
+                $"{ev.Connection.Tag} Server " +
+                $"(f=yellow){ev.Server.Name}(f=white) is still full; " +
+                $"remaining in queue.",
+                "Queue");
+
+            return;
+        }
 
         PendingQueueTargets[ev.Connection.PreAuth.UserId] = ev.Server;
 

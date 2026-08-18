@@ -109,7 +109,7 @@ public class QueueWorld : World
     public override void OnLoad(Session session)
     {
         QueueService.AddToQueue(session, ConnectingTo);
-        session.SpawnPlayer(new Vector3(0f, -300f, 0f));
+        session.SpawnPlayer(new Vector3(0f, -299f, 0f));
     }
 
     public override void OnUnload(Session session)

@@ -1,6 +1,7 @@
 ﻿using Microsoft.Extensions.Hosting;
 using SiteLink.API.Core;
 using SiteLink.API.Misc;
+using SiteLink.API.Models;
 using SiteLink.API.Networking;
 using SiteLink.API.Networking.Connections;
 using System.Collections.Concurrent;
@@ -10,6 +11,7 @@ namespace SiteLink.Queue.Services;
 public class QueueService : BackgroundService
 {
     public static ConcurrentDictionary<Server, List<string>> ServerQueues = new ConcurrentDictionary<Server, List<string>>();
+    private static readonly ConcurrentDictionary<string, DateTime> NextAttempts = new();
 
     public static int GetPositionInQueue(Session session, Server server)
     {
@@ -76,9 +78,35 @@ public class QueueService : BackgroundService
 
                     string nextPlayer = queue.Value[0];
 
-                    // If returns false then it means client is not connected to proxy anymore.
                     if (!RemoteConnection.TryGet(nextPlayer, out RemoteConnection client))
+                    {
+                        queue.Value.RemoveAt(0);
                         continue;
+                    }
+
+                    //
+                    // Don't create another pending backend session while
+                    // we're already attempting to move this player.
+                    //
+                    if (SessionManager.Singleton.Slots.TryGetValue(nextPlayer, out SessionSlot slot))
+                    {
+                        lock (slot)
+                        {
+                            if (slot.Pending != null)
+                                continue;
+                        }
+                    }
+
+                    string attemptKey = $"{queue.Key.Name}:{nextPlayer}";
+
+                    DateTime now = DateTime.UtcNow;
+
+                    if (NextAttempts.TryGetValue(attemptKey, out DateTime nextAttempt) && nextAttempt > now)
+                    {
+                        continue;
+                    }
+
+                    NextAttempts[attemptKey] = now.AddSeconds(3);
 
                     client.Connect(queue.Key, true);
                 }

@@ -131,7 +131,13 @@ public class QueueService : BackgroundService
                 return;
 
             NextAttempts[attemptKey] = now.AddSeconds(3);
-            client.Connect(server, true);
+
+            Session activeSession = client.Session;
+            if (activeSession?.World is QueueWorld queueWorld)
+                queueWorld.TryTransferTo(activeSession, server);
+            else
+                client.Connect(server, true);
+
             return;
         }
     }

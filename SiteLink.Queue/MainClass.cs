@@ -44,6 +44,14 @@ public class MainClass : Plugin<Config, Translations>
     public override Version ApiVersion { get; } = new Version(SiteLinkAPI.ApiVersionText);
     public override string Repository => "Killers0992/SiteLink.Queue";
 
+    public override void LoadConfig()
+    {
+        base.LoadConfig();
+
+        if (Config.QueueChannels?.Any(channel => channel?.MigrateLegacyConnectPrompt() == true) == true)
+            SaveConfig();
+    }
+
     public override void OnLoad(IServiceCollection collection)
     {
         Instance = this;
@@ -127,7 +135,25 @@ public class MainClass : Plugin<Config, Translations>
         if (session.World is not QueueWorld world)
             return InterceptResult.Pass();
 
-        world.TryConnectToAltServer(session);
+        if (session.Player == null ||
+            reader.Remaining < sizeof(byte) + sizeof(byte) + sizeof(ushort))
+        {
+            return InterceptResult.Drop();
+        }
+
+        int speakerId = reader.ReadRecyclablePlayerId().Value;
+        reader.ReadByte();
+        ushort dataLength = reader.ReadUShort();
+
+        if (speakerId == 0 ||
+            speakerId != session.Player.ReferenceHub.PlayerId.Value ||
+            dataLength == 0 ||
+            dataLength > reader.Remaining)
+        {
+            return InterceptResult.Drop();
+        }
+
+        world.RecordPttActivity(session);
         return InterceptResult.Drop();
     }
 
@@ -141,18 +167,41 @@ public class MainClass : Plugin<Config, Translations>
 
     private void OnConnectionResponse(ClientConnectionResponseEvent ev)
     {
+        Session activeSession = ev.Connection.Session;
+        QueueWorld activeQueueWorld = activeSession?.World as QueueWorld;
+
+        if (ev.Response is ServerIsOfflineResponse)
+        {
+            activeQueueWorld?.CancelAlternateAttempt(activeSession, ev.Server);
+            return;
+        }
+
         if (ev.Response is not ServerIsFullResponse)
             return;
+
+        if (activeQueueWorld != null &&
+            activeQueueWorld.TrySelectAllFullFallback(activeSession, ev.Server, out Server fallback))
+        {
+            ev.IsCancelled = true;
+            activeQueueWorld.ChangeTarget(activeSession, fallback);
+
+            SiteLinkLogger.Info(
+                $"{ev.Connection.Tag} All alternate servers are full; " +
+                $"remaining in the shortest queue for (f=yellow){fallback.Name}(f=white).",
+                "Queue");
+
+            return;
+        }
 
         if (!Config.ServersWithQueue.Contains(ev.Server.Name))
             return;
 
         ev.IsCancelled = true;
 
-        if (ev.Connection.Session?.Server == QueueServer.Instance)
+        if (activeSession?.Server == QueueServer.Instance)
         {
-            if (ev.Connection.Session.World is QueueWorld queueWorld)
-                queueWorld.ChangeTarget(ev.Connection.Session, ev.Server);
+            if (activeQueueWorld != null)
+                activeQueueWorld.ChangeTarget(activeSession, ev.Server);
 
             SiteLinkLogger.Info(
                 $"{ev.Connection.Tag} Server " +

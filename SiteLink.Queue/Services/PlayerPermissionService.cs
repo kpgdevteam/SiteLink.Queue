@@ -1,4 +1,5 @@
 ﻿using Grpc.Core;
+using Grpc.Net.Client;
 using KingsPlayground.Shared.Protobuf;
 using Microsoft.Extensions.Hosting;
 using SiteLink.API.Misc;
@@ -101,14 +102,14 @@ internal sealed class PlayerPermissionService : IHostedService
     {
         while (!cancellationToken.IsCancellationRequested)
         {
-            Channel channel = null;
+            GrpcChannel channel = null;
             AsyncDuplexStreamingCall<ProxyServerRequest, ProxyServerResponse> streams = null;
 
             try
             {
                 Config config = _getConfig();
-                string target = NormalizeTarget(config.GrpcUrl);
-                channel = new Channel(target, ChannelCredentials.Insecure);
+                string address = NormalizeAddress(config.GrpcUrl);
+                channel = GrpcChannel.ForAddress(address);
 
                 var client = new ProxyServerService.ProxyServerServiceClient(channel);
                 Metadata metadata = CreateMetadata(config);
@@ -123,7 +124,7 @@ internal sealed class PlayerPermissionService : IHostedService
 
                 streams = client.Connect(metadata, cancellationToken: cancellationToken);
                 PublishRequestStream(streams.RequestStream);
-                SiteLinkLogger.Info($"Connected to proxy-server gRPC service at (f=cyan){target}(f=white).", "Queue");
+                SiteLinkLogger.Info($"Connected to proxy-server gRPC service at (f=cyan){address}(f=white).", "Queue");
 
                 while (await streams.ResponseStream.MoveNext(cancellationToken))
                     HandleResponse(streams.ResponseStream.Current);
@@ -156,7 +157,7 @@ internal sealed class PlayerPermissionService : IHostedService
                 {
                     try
                     {
-                        await channel.ShutdownAsync();
+                        channel.Dispose();
                     }
                     catch (Exception)
                     {
@@ -260,17 +261,24 @@ internal sealed class PlayerPermissionService : IHostedService
     private static TaskCompletionSource<IClientStreamWriter<ProxyServerRequest>> CreateStreamSource() =>
         new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    private static string NormalizeTarget(string url)
+    private static string NormalizeAddress(string url)
     {
-        string target = (url ?? string.Empty).Trim().TrimEnd('/');
-        if (target.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
-            target = target[7..];
-        else if (target.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-            target = target[8..];
-
-        if (string.IsNullOrWhiteSpace(target))
+        string address = (url ?? string.Empty).Trim().TrimEnd('/');
+        if (string.IsNullOrWhiteSpace(address))
             throw new InvalidOperationException("The gRPC URL is not configured.");
 
-        return target;
+        if (!address.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+            !address.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            address = $"http://{address}";
+        }
+
+        if (!Uri.TryCreate(address, UriKind.Absolute, out Uri uri) ||
+            (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+        {
+            throw new InvalidOperationException("The gRPC URL must use http:// or https://.");
+        }
+
+        return uri.GetLeftPart(UriPartial.Authority);
     }
 }

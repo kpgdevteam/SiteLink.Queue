@@ -14,8 +14,8 @@
 
 	<ItemGroup>
 		<PackageReference Include="Google.Protobuf" Version="3.33.0" />
-		<PackageReference Include="Grpc.Core" Version="2.46.6" />
-		<PackageReference Include="Grpc.Tools" Version="2.46.6" PrivateAssets="All" />
+		<PackageReference Include="Grpc.Net.Client" Version="2.80.0" />
+		<PackageReference Include="Grpc.Tools" Version="2.80.0" PrivateAssets="All" />
 		<PackageReference Include="Microsoft.Extensions.Hosting" Version="9.0.4" />
 		<PackageReference Include="SiteLink.API" Version="0.0.3" Condition="'$(Configuration)' == 'Release'" />
 	</ItemGroup>

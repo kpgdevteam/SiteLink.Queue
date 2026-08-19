@@ -31,15 +31,15 @@ namespace SiteLink.Queue
 
         public override void OnSessionReady(Session session)
         {
-            if (!MainClass.TryTakeQueueTarget(
+            if (!MainClass.TryTakeQueueAdmission(
                     session.UserId,
-                    out Server target))
+                    out QueueAdmission admission))
             {
                 session.Disconnect("Queue destination was not found.");
                 return;
             }
 
-            session.World = new QueueWorld(target);
+            session.World = new QueueWorld(admission.Target, admission.Channel);
         }
     }
 }

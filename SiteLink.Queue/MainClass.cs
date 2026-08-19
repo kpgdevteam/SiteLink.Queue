@@ -16,17 +16,21 @@ namespace SiteLink.Queue;
 
 public class MainClass : Plugin<Config, Translations>
 {
-    private static readonly ConcurrentDictionary<string, Server> PendingQueueTargets = new();
+    private static readonly ConcurrentDictionary<string, QueueAdmission> PendingQueueAdmissions = new();
+
+    private readonly ConcurrentDictionary<string, byte> _admissionsInProgress = new();
+    private readonly CancellationTokenSource _admissionCancellation = new();
+    private PlayerPermissionService _permissionService;
 
     public static MainClass Instance { get; private set; }
 
     public QueueServer QueueServer { get; private set; }
 
-    internal static bool TryTakeQueueTarget(string userId, out Server server)
+    internal static bool TryTakeQueueAdmission(string userId, out QueueAdmission admission)
     {
-        return PendingQueueTargets.TryRemove(
+        return PendingQueueAdmissions.TryRemove(
             userId,
-            out server);
+            out admission);
     }
 
     public override string Name { get; } = "Queue";
@@ -35,7 +39,7 @@ public class MainClass : Plugin<Config, Translations>
 
     public override string Author { get; } = "Killers0992";
 
-    public override Version Version { get; } = new Version(1, 1, 0);
+    public override Version Version { get; } = new Version(1, 2, 0);
 
     public override Version ApiVersion { get; } = new Version(SiteLinkAPI.ApiVersionText);
     public override string Repository => "Killers0992/SiteLink.Queue";
@@ -63,6 +67,9 @@ public class MainClass : Plugin<Config, Translations>
                 .Format();
         });
 
+        _permissionService = new PlayerPermissionService(() => Config);
+        collection.AddSingleton(_permissionService);
+        collection.AddHostedService(_ => _permissionService);
         collection.AddHostedService<QueueService>();
 
         EventManager.Client.ConnectionResponse += OnConnectionResponse;
@@ -75,6 +82,26 @@ public class MainClass : Plugin<Config, Translations>
 
     public override void OnUnload()
     {
+        _admissionCancellation.Cancel();
+        PendingQueueAdmissions.Clear();
+        _admissionsInProgress.Clear();
+
+        if (_permissionService != null)
+        {
+            try
+            {
+                _permissionService.ShutdownAsync().GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                SiteLinkLogger.Error(ex, "Queue");
+            }
+
+            _permissionService = null;
+        }
+
+        QueueService.Clear();
+
         if (QueueServer != null)
         {
             Server.Unregister(QueueServer.Name);
@@ -109,13 +136,7 @@ public class MainClass : Plugin<Config, Translations>
         if (!Config.ServersWithQueue.Contains(ev.Server.Name))
             return;
 
-        if (!QueueService.ServerQueues.TryGetValue(ev.Server, out List<string> queues))
-            return;
-
-        if (!queues.Contains(ev.Session.UserId))
-            return;
-
-        queues.Remove(ev.Session.UserId);
+        QueueService.RemoveFromQueue(ev.Session.UserId, ev.Server);
     }
 
     private void OnConnectionResponse(ClientConnectionResponseEvent ev)
@@ -131,7 +152,7 @@ public class MainClass : Plugin<Config, Translations>
         if (ev.Connection.Session?.Server == QueueServer.Instance)
         {
             if (ev.Connection.Session.World is QueueWorld queueWorld)
-                queueWorld.ConnectingTo = ev.Server;
+                queueWorld.ChangeTarget(ev.Connection.Session, ev.Server);
 
             SiteLinkLogger.Info(
                 $"{ev.Connection.Tag} Server " +
@@ -142,8 +163,88 @@ public class MainClass : Plugin<Config, Translations>
             return;
         }
 
-        PendingQueueTargets[ev.Connection.PreAuth.UserId] = ev.Server;
+        _ = AdmitToQueueAsync(ev.Connection, ev.Server, _admissionCancellation.Token);
+    }
 
-        ev.Connection.Connect(QueueServer.Instance, silent: true);
+    internal static QueueChannel SelectChannel(
+        IEnumerable<QueueChannelConfig> channels,
+        IReadOnlySet<int> permissions)
+    {
+        return channels?
+            .Where(channel => channel != null &&
+                              (!channel.Permission.HasValue || permissions.Contains(channel.Permission.Value)))
+            .Select((channel, index) => new { Channel = channel, Index = index })
+            .OrderByDescending(candidate => candidate.Channel.Weight)
+            .ThenBy(candidate => candidate.Index)
+            .Select(candidate => candidate.Channel.Snapshot())
+            .FirstOrDefault();
+    }
+
+    private async Task AdmitToQueueAsync(
+        SiteLink.API.Networking.Connections.RemoteConnection connection,
+        Server target,
+        CancellationToken cancellationToken)
+    {
+        string userId = connection.PreAuth.UserId;
+        if (!_admissionsInProgress.TryAdd(userId, 0))
+            return;
+
+        try
+        {
+            IReadOnlySet<int> permissions;
+            try
+            {
+                permissions = await _permissionService.LookupAsync(userId, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                SiteLinkLogger.Error(
+                    $"Permission lookup failed for (f=cyan){userId}(f=white); using a public queue channel. {ex}",
+                    "Queue");
+                permissions = new HashSet<int>();
+            }
+
+            QueueChannel channel = SelectChannel(Config.QueueChannels, permissions);
+            if (channel == null)
+            {
+                string message = connection.Session == null
+                    ? Translation.NoEligibleQueueChannel
+                    : GetTranslation(connection.Session).NoEligibleQueueChannel;
+                connection.Disconnect(message);
+                return;
+            }
+
+            if (!SiteLink.API.Networking.Connections.RemoteConnection.TryGet(userId, out var current) ||
+                !ReferenceEquals(current, connection) ||
+                connection.IsDisposed)
+            {
+                return;
+            }
+
+            PendingQueueAdmissions[userId] = new QueueAdmission(target, channel);
+            try
+            {
+                connection.Connect(QueueServer.Instance, silent: true);
+            }
+            catch
+            {
+                PendingQueueAdmissions.TryRemove(userId, out _);
+                throw;
+            }
+        }
+        catch (Exception ex)
+        {
+            SiteLinkLogger.Error(ex, "Queue");
+        }
+        finally
+        {
+            _admissionsInProgress.TryRemove(userId, out _);
+        }
     }
 }
+
+internal sealed record QueueAdmission(Server Target, QueueChannel Channel);

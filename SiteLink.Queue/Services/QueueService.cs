@@ -4,50 +4,55 @@ using SiteLink.API.Misc;
 using SiteLink.API.Models;
 using SiteLink.API.Networking;
 using SiteLink.API.Networking.Connections;
+using SiteLink.API.Translations;
 using System.Collections.Concurrent;
 
 namespace SiteLink.Queue.Services;
 
 public class QueueService : BackgroundService
 {
-    public static ConcurrentDictionary<Server, List<string>> ServerQueues = new ConcurrentDictionary<Server, List<string>>();
-    private static readonly ConcurrentDictionary<string, DateTime> NextAttempts = new();
+    private static readonly ConcurrentDictionary<Server, WeightedQueue> ServerQueues = new();
+    private static readonly ConcurrentDictionary<(Server Server, string UserId), DateTime> NextAttempts = new();
+    private static long _nextSequence;
 
     public static int GetPositionInQueue(Session session, Server server)
     {
-        if (!ServerQueues.TryGetValue(server, out List<string> queues))
+        if (session == null || !ServerQueues.TryGetValue(server, out WeightedQueue queue))
             return -1;
 
-        return queues.IndexOf(session.UserId) + 1;
+        return queue.GetPosition(session.UserId);
     }
 
     public static int GetQueueLength(Server server)
     {
-        if (!ServerQueues.TryGetValue(server, out List<string> queues))
+        if (!ServerQueues.TryGetValue(server, out WeightedQueue queue))
             return 0;
 
-        return queues.Count;
+        return queue.Count;
     }
 
-    public static void AddToQueue(Session session, Server server)
+    internal static void AddToQueue(Session session, Server server, QueueChannel channel)
     {
-        if (!ServerQueues.TryGetValue(server, out List<string> queues))
-        {
-            queues = new List<string>();
-            ServerQueues.TryAdd(server, queues);
-        }
-
-        if (queues.Contains(session.UserId))
+        if (session == null || server == null || channel == null)
             return;
 
-        queues.Add(session.UserId);
+        WeightedQueue queue = ServerQueues.GetOrAdd(server, _ => new WeightedQueue());
+        if (!queue.Add(session.UserId, channel, Interlocked.Increment(ref _nextSequence)))
+            return;
+
+        int position = GetPositionInQueue(session, server);
+        SiteLinkLogger.Info(
+            MainClass.Instance.Translate(
+                session,
+                translations => translations.AddedToQueueLog,
+                TranslationContext.For(session, server, MainClass.Instance)
+                    .With("queue_channel", channel.DisplayName)
+                    .With("queue_position", position)),
+            "Queue");
     }
 
     public static void RemoveFromQueue(Session session, Server server)
     {
-        if (!ServerQueues.TryGetValue(server, out List<string> queues))
-            return;
-
         if (session == null)
         {
             SiteLinkLogger.Error(
@@ -57,7 +62,23 @@ public class QueueService : BackgroundService
             return;
         }
 
-        queues.Remove(session.UserId);
+        RemoveFromQueue(session.UserId, server);
+    }
+
+    internal static void RemoveFromQueue(string userId, Server server)
+    {
+        if (string.IsNullOrEmpty(userId) || server == null || !ServerQueues.TryGetValue(server, out WeightedQueue queue))
+            return;
+
+        queue.Remove(userId);
+
+        NextAttempts.TryRemove((server, userId), out _);
+    }
+
+    internal static void Clear()
+    {
+        ServerQueues.Clear();
+        NextAttempts.Clear();
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -66,52 +87,14 @@ public class QueueService : BackgroundService
         {
             try
             {
-                foreach (var queue in ServerQueues)
-                {
-                    // If server is still full dont do anything and skip.
-                    if (queue.Key.SessionsCount >= queue.Key.MaxSessions)
-                        continue;
+                foreach ((Server server, WeightedQueue queue) in ServerQueues)
+                    TryAdvance(server, queue);
 
-                    // If theres no one in queue then skip.
-                    if (queue.Value.Count == 0)
-                        continue;
-
-                    string nextPlayer = queue.Value[0];
-
-                    if (!RemoteConnection.TryGet(nextPlayer, out RemoteConnection client))
-                    {
-                        queue.Value.RemoveAt(0);
-                        continue;
-                    }
-
-                    //
-                    // Don't create another pending backend session while
-                    // we're already attempting to move this player.
-                    //
-                    if (SessionManager.Singleton.Slots.TryGetValue(nextPlayer, out SessionSlot slot))
-                    {
-                        lock (slot)
-                        {
-                            if (slot.Pending != null)
-                                continue;
-                        }
-                    }
-
-                    string attemptKey = $"{queue.Key.Name}:{nextPlayer}";
-
-                    DateTime now = DateTime.UtcNow;
-
-                    if (NextAttempts.TryGetValue(attemptKey, out DateTime nextAttempt) && nextAttempt > now)
-                    {
-                        continue;
-                    }
-
-                    NextAttempts[attemptKey] = now.AddSeconds(3);
-
-                    client.Connect(queue.Key, true);
-                }
-
-                await Task.Delay(500);
+                await Task.Delay(500, stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
             }
             catch (Exception ex)
             {
@@ -119,4 +102,38 @@ public class QueueService : BackgroundService
             }
         }
     }
+
+    private static void TryAdvance(Server server, WeightedQueue queue)
+    {
+        if (server.SessionsCount >= server.MaxSessions)
+            return;
+
+        while (queue.Peek() is { } next)
+        {
+            if (!RemoteConnection.TryGet(next.UserId, out RemoteConnection client))
+            {
+                RemoveFromQueue(next.UserId, server);
+                continue;
+            }
+
+            if (SessionManager.Singleton.Slots.TryGetValue(next.UserId, out SessionSlot slot))
+            {
+                lock (slot)
+                {
+                    if (slot.Pending != null)
+                        return;
+                }
+            }
+
+            DateTime now = DateTime.UtcNow;
+            var attemptKey = (server, next.UserId);
+            if (NextAttempts.TryGetValue(attemptKey, out DateTime nextAttempt) && nextAttempt > now)
+                return;
+
+            NextAttempts[attemptKey] = now.AddSeconds(3);
+            client.Connect(server, true);
+            return;
+        }
+    }
+
 }

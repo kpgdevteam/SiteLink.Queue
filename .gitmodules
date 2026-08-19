@@ -1,0 +1,3 @@
+[submodule "SiteLink.Queue/Grpc/Protos"]
+	path = SiteLink.Queue/Grpc/Protos
+	url = https://github.com/kpgdevteam/KingsPlayground.Shared.Protos.git

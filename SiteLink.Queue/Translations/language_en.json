@@ -1,7 +1,7 @@
 {
-  "QueueText": "<color=orange>{queue_server}</color> <color=white>is full</color>\n<color=white>You are </color><color=orange>{queue_position_ordinal}</color><color=white> in the queue</color>\n\n<color=orange>{alt_server}</color> <color=white>has </color><color=orange>{alt_online}/{alt_max}</color><color=white> players online</color>\n<color=white>Press </color><color=orange>[ALT]</color><color=white> to connect</color>",
   "QueueCountEmpty": "",
   "QueueCount": "+{queue_length} in queue",
-  "AddedToQueueLog": "Added (f=cyan){user_id}(f=white) to the (f=yellow){server_name}(f=white) queue at position (f=green){queue_position}(f=white).",
+  "AddedToQueueLog": "Added (f=cyan){user_id}(f=white) to the (f=yellow){server_name}(f=white) {queue_channel} queue at position (f=green){queue_position}(f=white).",
+  "NoEligibleQueueChannel": "You do not have permission to join any configured queue channel.",
   "NullSessionLog": "(f=red)Failed to remove a player from the queue because the session was null.(f=white)"
 }

@@ -16,13 +16,16 @@ public class QueueWorld : World
 
     public Server ConnectingTo;
 
+    internal QueueChannel Channel { get; }
+
     public DateTime Delay;
 
-    public QueueWorld(Server server) : base("Queue")
+    internal QueueWorld(Server server, QueueChannel channel) : base("Queue")
     {
         DestroyOnEmpty = true;
 
         ConnectingTo = server;
+        Channel = channel;
 
         AddWaypoint(new Vector3(0f, -300f, 0f));
     }
@@ -59,6 +62,16 @@ public class QueueWorld : World
         session.Connection.Connect(altServer, true);
     }
 
+    public void ChangeTarget(Session session, Server target)
+    {
+        if (session == null || target == null || ReferenceEquals(ConnectingTo, target))
+            return;
+
+        QueueService.RemoveFromQueue(session.UserId, ConnectingTo);
+        ConnectingTo = target;
+        QueueService.AddToQueue(session, ConnectingTo, Channel);
+    }
+
     private string BuildQueueText(Session session)
     {
         int position = QueueService.GetPositionInQueue(session, ConnectingTo);
@@ -66,10 +79,10 @@ public class QueueWorld : World
 
         TryGetAltServer(out Server altServer);
 
-        return MainClass.Instance.Translate(
-            session,
-            translations => translations.QueueText,
+        return TranslationManager.Format(
+            Channel.QueueText,
             TranslationContext.For(session, ConnectingTo, MainClass.Instance)
+                .With("queue_channel", Channel.DisplayName)
                 .With("queue_server", ConnectingTo.DisplayName)
                 .With("queue_server_name", ConnectingTo.Name)
                 .With("queue_position", position)
@@ -78,7 +91,8 @@ public class QueueWorld : World
                 .With("alt_server", altServer?.DisplayName ?? string.Empty)
                 .With("alt_server_name", altServer?.Name ?? string.Empty)
                 .With("alt_online", altServer?.SessionsCount ?? 0)
-                .With("alt_max", altServer?.MaxSessions ?? 0));
+                .With("alt_max", altServer?.MaxSessions ?? 0))
+            .Format();
     }
 
     private bool TryGetAltServer(out Server server)
@@ -108,7 +122,7 @@ public class QueueWorld : World
 
     public override void OnLoad(Session session)
     {
-        QueueService.AddToQueue(session, ConnectingTo);
+        QueueService.AddToQueue(session, ConnectingTo, Channel);
         session.SpawnPlayer(new Vector3(0f, -299f, 0f));
     }
 

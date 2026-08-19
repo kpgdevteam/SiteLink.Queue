@@ -7,17 +7,27 @@
 		<Product>SiteLink.Queue</Product>
 		<Description>Adds translated queue worlds and priority connection flow to SiteLink.</Description>
 		<Authors>Killers0992</Authors>
-		<Version>1.0.1</Version>
+		<Version>1.2.0</Version>
+		<CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
 
 	</PropertyGroup>
 
 	<ItemGroup>
+		<PackageReference Include="Google.Protobuf" Version="3.33.0" />
+		<PackageReference Include="Grpc.Core" Version="2.46.6" />
+		<PackageReference Include="Grpc.Tools" Version="2.46.6" PrivateAssets="All" />
 		<PackageReference Include="Microsoft.Extensions.Hosting" Version="9.0.4" />
 		<PackageReference Include="SiteLink.API" Version="0.0.3" Condition="'$(Configuration)' == 'Release'" />
 	</ItemGroup>
 
 	<ItemGroup>
-	  <ProjectReference Include="..\..\SiteLink\SiteLink.API\SiteLink.API.csproj" />
+		<Protobuf Include="Grpc/Protos/common.proto" GrpcServices="Client" />
+		<Protobuf Include="Grpc/Protos/proxyserver.proto" GrpcServices="Client" />
+	</ItemGroup>
+
+	<ItemGroup>
+	  <ProjectReference Include="..\..\SiteLink\SiteLink.API\SiteLink.API.csproj"
+	                    SetTargetFramework="TargetFramework=net10.0" />
 	</ItemGroup>
 
 	<ItemGroup>

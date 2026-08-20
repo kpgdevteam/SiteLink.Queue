@@ -18,6 +18,10 @@ public sealed class Translations
     public string NoEligibleQueueChannel { get; set; } =
         "You do not have permission to join any configured queue channel.";
 
+    [Description("Shown when the queue service cannot resolve the player's database ID.")]
+    public string QueueLookupFailed { get; set; } =
+        "The queue service could not look up your player account. Please try again.";
+
     [Description("No placeholders.")]
     public string NullSessionLog { get; set; } =
         "(f=red)Failed to remove a player from the queue because the session was null.(f=white)";

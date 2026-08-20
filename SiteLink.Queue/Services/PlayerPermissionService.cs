@@ -3,6 +3,7 @@ using Grpc.Net.Client;
 using KingsPlayground.Shared.Protobuf;
 using Microsoft.Extensions.Hosting;
 using SiteLink.API.Misc;
+using System.Threading.Channels;
 
 namespace SiteLink.Queue.Services;
 
@@ -16,9 +17,16 @@ internal sealed class PlayerPermissionService : IHostedService
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly object _streamStateLock = new();
     private readonly CorrelatedResponseRegistry<ProxyServerResponse> _responses = new();
+    private readonly Channel<QueueStatusUpdate> _queueStatusUpdates = Channel.CreateUnbounded<QueueStatusUpdate>(
+        new UnboundedChannelOptions
+        {
+            SingleReader = true,
+            SingleWriter = false
+        });
 
     private TaskCompletionSource<IClientStreamWriter<ProxyServerRequest>> _requestStreamSource = CreateStreamSource();
     private Task _connectionTask;
+    private Task _queueStatusTask;
     private int _started;
 
     internal int PendingRequestCount => _responses.Count;
@@ -32,14 +40,17 @@ internal sealed class PlayerPermissionService : IHostedService
     public Task StartAsync(CancellationToken cancellationToken)
     {
         if (Interlocked.Exchange(ref _started, 1) == 0)
+        {
             _connectionTask = Task.Run(() => RunConnectionLoopAsync(_shutdown.Token), CancellationToken.None);
+            _queueStatusTask = Task.Run(() => RunQueueStatusLoopAsync(_shutdown.Token), CancellationToken.None);
+        }
 
         return Task.CompletedTask;
     }
 
     public Task StopAsync(CancellationToken cancellationToken) => ShutdownAsync();
 
-    public async Task<IReadOnlySet<int>> LookupAsync(string userId, CancellationToken cancellationToken)
+    public async Task<PlayerLookupResult> LookupAsync(string userId, CancellationToken cancellationToken)
     {
         string correlationId = Guid.NewGuid().ToString();
         TaskCompletionSource<ProxyServerResponse> responseSource = _responses.Register(correlationId);
@@ -68,9 +79,14 @@ internal sealed class PlayerPermissionService : IHostedService
                     $"Queue permission lookup received unexpected payload {response.PayloadCase}.");
             }
 
-            return response.PlayerLookupResponse.Permissions
+            if (response.PlayerLookupResponse.Id <= 0)
+                throw new InvalidOperationException("Queue player lookup did not return a valid player ID.");
+
+            IReadOnlySet<int> permissions = response.PlayerLookupResponse.Permissions
                 .Select(permission => (int)permission)
                 .ToHashSet();
+
+            return new PlayerLookupResult(response.PlayerLookupResponse.Id, permissions);
         }
         finally
         {
@@ -78,23 +94,67 @@ internal sealed class PlayerPermissionService : IHostedService
         }
     }
 
+    public void PublishQueueStatus(QueueStatusUpdate update)
+    {
+        if (update == null || _shutdown.IsCancellationRequested)
+            return;
+
+        if (!_queueStatusUpdates.Writer.TryWrite(update))
+            SiteLinkLogger.Warn("Failed to queue a proxy-server queue status update.", "Queue");
+    }
+
     public async Task ShutdownAsync()
     {
         if (!_shutdown.IsCancellationRequested)
             _shutdown.Cancel();
 
+        _queueStatusUpdates.Writer.TryComplete();
         FailStreamAndPending(new OperationCanceledException("The proxy-server gRPC client is shutting down."));
 
-        if (_connectionTask == null)
+        if (_connectionTask == null && _queueStatusTask == null)
             return;
 
         try
         {
-            await _connectionTask;
+            await Task.WhenAll(
+                _connectionTask ?? Task.CompletedTask,
+                _queueStatusTask ?? Task.CompletedTask);
         }
         catch (OperationCanceledException) when (_shutdown.IsCancellationRequested)
         {
             // Expected during shutdown.
+        }
+    }
+
+    private async Task RunQueueStatusLoopAsync(CancellationToken cancellationToken)
+    {
+        await foreach (QueueStatusUpdate update in _queueStatusUpdates.Reader.ReadAllAsync(cancellationToken))
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                try
+                {
+                    await WriteAsync(
+                        new ProxyServerRequest
+                        {
+                            CorrelationId = Guid.NewGuid().ToString(),
+                            QueueStatusUpdate = update
+                        },
+                        cancellationToken);
+                    break;
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    SiteLinkLogger.Error($"Failed to send a queue status update: {ex}", "Queue");
+
+                    double retrySeconds = Math.Max(0, _getConfig().ConnectionRetryCooldown);
+                    await Task.Delay(TimeSpan.FromSeconds(retrySeconds), cancellationToken);
+                }
+            }
         }
     }
 
@@ -282,3 +342,5 @@ internal sealed class PlayerPermissionService : IHostedService
         return uri.GetLeftPart(UriPartial.Authority);
     }
 }
+
+internal sealed record PlayerLookupResult(int PlayerId, IReadOnlySet<int> Permissions);

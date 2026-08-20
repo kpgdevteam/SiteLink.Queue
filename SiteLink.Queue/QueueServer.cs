@@ -39,7 +39,7 @@ namespace SiteLink.Queue
                 return;
             }
 
-            session.World = new QueueWorld(admission.Target, admission.Channel);
+            session.World = new QueueWorld(admission.Target, admission.Channel, admission.PlayerId);
         }
     }
 }

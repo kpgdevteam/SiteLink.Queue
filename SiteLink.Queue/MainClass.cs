@@ -11,6 +11,7 @@ using SiteLink.API.Structs;
 using SiteLink.API.Translations;
 using SiteLink.Queue.Services;
 using System.Collections.Concurrent;
+using KingsPlayground.Shared.Protobuf;
 
 namespace SiteLink.Queue;
 
@@ -32,6 +33,9 @@ public class MainClass : Plugin<Config, Translations>
             userId,
             out admission);
     }
+
+    internal void PublishQueueStatus(QueueStatusUpdate update) =>
+        _permissionService?.PublishQueueStatus(update);
 
     public override string Name { get; } = "Queue";
 
@@ -240,10 +244,10 @@ public class MainClass : Plugin<Config, Translations>
 
         try
         {
-            IReadOnlySet<int> permissions;
+            PlayerLookupResult lookup;
             try
             {
-                permissions = await _permissionService.LookupAsync(userId, cancellationToken);
+                lookup = await _permissionService.LookupAsync(userId, cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -252,12 +256,23 @@ public class MainClass : Plugin<Config, Translations>
             catch (Exception ex)
             {
                 SiteLinkLogger.Error(
-                    $"Permission lookup failed for (f=cyan){userId}(f=white); using a public queue channel. {ex}",
+                    $"Player lookup failed for (f=cyan){userId}(f=white); queue admission was rejected. {ex}",
                     "Queue");
-                permissions = new HashSet<int>();
+
+                if (SiteLink.API.Networking.Connections.RemoteConnection.TryGet(userId, out var failedLookupConnection) &&
+                    ReferenceEquals(failedLookupConnection, connection) &&
+                    !connection.IsDisposed)
+                {
+                    string message = connection.Session == null
+                        ? Translation.QueueLookupFailed
+                        : GetTranslation(connection.Session).QueueLookupFailed;
+                    connection.Disconnect(message);
+                }
+
+                return;
             }
 
-            QueueChannel channel = SelectChannel(Config.QueueChannels, permissions);
+            QueueChannel channel = SelectChannel(Config.QueueChannels, lookup.Permissions);
             if (channel == null)
             {
                 string message = connection.Session == null
@@ -274,7 +289,7 @@ public class MainClass : Plugin<Config, Translations>
                 return;
             }
 
-            PendingQueueAdmissions[userId] = new QueueAdmission(target, channel);
+            PendingQueueAdmissions[userId] = new QueueAdmission(target, channel, lookup.PlayerId);
             try
             {
                 connection.Connect(QueueServer.Instance, silent: true);
@@ -296,4 +311,4 @@ public class MainClass : Plugin<Config, Translations>
     }
 }
 
-internal sealed record QueueAdmission(Server Target, QueueChannel Channel);
+internal sealed record QueueAdmission(Server Target, QueueChannel Channel, int PlayerId);

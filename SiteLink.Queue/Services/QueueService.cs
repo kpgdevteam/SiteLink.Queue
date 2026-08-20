@@ -1,4 +1,5 @@
 ﻿using Microsoft.Extensions.Hosting;
+using KingsPlayground.Shared.Protobuf;
 using SiteLink.API.Core;
 using SiteLink.API.Misc;
 using SiteLink.API.Models;
@@ -13,6 +14,7 @@ public class QueueService : BackgroundService
 {
     private static readonly ConcurrentDictionary<Server, WeightedQueue> ServerQueues = new();
     private static readonly ConcurrentDictionary<(Server Server, string UserId), DateTime> NextAttempts = new();
+    private static readonly object QueueMutationLock = new();
     private static long _nextSequence;
 
     public static int GetPositionInQueue(Session session, Server server)
@@ -31,16 +33,22 @@ public class QueueService : BackgroundService
         return queue.Count;
     }
 
-    internal static void AddToQueue(Session session, Server server, QueueChannel channel)
+    internal static void AddToQueue(Session session, Server server, QueueChannel channel, int playerId)
     {
-        if (session == null || server == null || channel == null)
+        if (session == null || server == null || channel == null || playerId <= 0)
             return;
 
-        WeightedQueue queue = ServerQueues.GetOrAdd(server, _ => new WeightedQueue());
-        if (!queue.Add(session.UserId, channel, Interlocked.Increment(ref _nextSequence)))
-            return;
+        int position;
+        lock (QueueMutationLock)
+        {
+            WeightedQueue queue = ServerQueues.GetOrAdd(server, _ => new WeightedQueue());
+            if (!queue.Add(session.UserId, playerId, channel, Interlocked.Increment(ref _nextSequence)))
+                return;
 
-        int position = GetPositionInQueue(session, server);
+            position = queue.GetPosition(session.UserId);
+            MainClass.Instance?.PublishQueueStatus(CreateStatusUpdate());
+        }
+
         SiteLinkLogger.Info(
             MainClass.Instance.Translate(
                 session,
@@ -67,18 +75,68 @@ public class QueueService : BackgroundService
 
     internal static void RemoveFromQueue(string userId, Server server)
     {
-        if (string.IsNullOrEmpty(userId) || server == null || !ServerQueues.TryGetValue(server, out WeightedQueue queue))
+        if (string.IsNullOrEmpty(userId) || server == null)
             return;
 
-        queue.Remove(userId);
+        lock (QueueMutationLock)
+        {
+            if (!ServerQueues.TryGetValue(server, out WeightedQueue queue))
+                return;
 
-        NextAttempts.TryRemove((server, userId), out _);
+            NextAttempts.TryRemove((server, userId), out _);
+            if (!queue.Remove(userId))
+                return;
+
+            MainClass.Instance?.PublishQueueStatus(CreateStatusUpdate());
+        }
     }
 
     internal static void Clear()
     {
-        ServerQueues.Clear();
-        NextAttempts.Clear();
+        lock (QueueMutationLock)
+        {
+            ServerQueues.Clear();
+            NextAttempts.Clear();
+        }
+    }
+
+    private static QueueStatusUpdate CreateStatusUpdate()
+    {
+        var update = new QueueStatusUpdate();
+        string[] configuredServers = MainClass.Instance?.Config?.ServersWithQueue ?? [];
+        var includedServers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (string configuredName in configuredServers)
+        {
+            if (string.IsNullOrWhiteSpace(configuredName) || !includedServers.Add(configuredName))
+                continue;
+
+            string serverName = configuredName;
+            int[] playerIds = [];
+            if (Server.TryGetByName(configuredName, out Server server))
+            {
+                serverName = server.Name;
+                if (ServerQueues.TryGetValue(server, out WeightedQueue queue))
+                    playerIds = queue.GetOrderedPlayerIds();
+            }
+
+            var status = new QueueStatus { ServerName = serverName };
+            status.PlayerIds.AddRange(playerIds);
+            update.Queues.Add(status);
+        }
+
+        foreach ((Server server, WeightedQueue queue) in
+                 ServerQueues.OrderBy(entry => entry.Key.Name, StringComparer.Ordinal))
+        {
+            if (!includedServers.Add(server.Name))
+                continue;
+
+            var status = new QueueStatus { ServerName = server.Name };
+            status.PlayerIds.AddRange(queue.GetOrderedPlayerIds());
+            update.Queues.Add(status);
+        }
+
+        return update;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -105,6 +163,9 @@ public class QueueService : BackgroundService
 
     private static void TryAdvance(Server server, WeightedQueue queue)
     {
+        if (server.IsRestartAdmissionBlocked)
+            return;
+
         if (server.SessionsCount >= server.MaxSessions)
             return;
 
